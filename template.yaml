@@ -1,0 +1,234 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Site E-commerce Perito TI Judicial
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.9
+    Environment:
+      Variables:
+        CORS_ORIGIN: !Ref CorsOrigin
+
+Parameters:
+  CorsOrigin:
+    Type: String
+    Default: "*"
+  StripeSecretKey:
+    Type: String
+    NoEcho: true
+
+Resources:
+  # DynamoDB Tables
+  UsuariosTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: usuarios
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  CasosTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: casos
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: usuario_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: usuario-index
+          KeySchema:
+            - AttributeName: usuario_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+
+  DocumentosTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: documentos
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: caso_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: caso-index
+          KeySchema:
+            - AttributeName: caso_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+
+  ArtigosBlogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: artigos_blog
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  # S3 Buckets
+  DocumentosBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-documentos"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET, PUT, POST]
+            AllowedOrigins: [!Ref CorsOrigin]
+
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-users"
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub "${AWS::StackName}-client"
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ADMIN_NO_SRP_AUTH
+        - USER_PASSWORD_AUTH
+
+  # API Gateway
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors:
+        AllowMethods: "'*'"
+        AllowHeaders: "'*'"
+        AllowOrigin: !Sub "'${CorsOrigin}'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+
+  # Lambda Functions
+  CadastroFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/auth/
+      Handler: cadastro.lambda_handler
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+      Policies:
+        - CognitoPowerUser
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /auth/cadastro
+            Method: post
+            Auth:
+              Authorizer: NONE
+
+  SubmissaoCasoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/casos/
+      Handler: submissao.lambda_handler
+      Environment:
+        Variables:
+          CASOS_TABLE: !Ref CasosTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CasosTable
+        - SESCrudPolicy:
+            IdentityName: "*"
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /casos/submeter
+            Method: post
+
+  GerarUrlUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/documentos/
+      Handler: upload.lambda_handler
+      Environment:
+        Variables:
+          DOCUMENTOS_BUCKET: !Ref DocumentosBucket
+          DOCUMENTOS_TABLE: !Ref DocumentosTable
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref DocumentosBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentosTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /documentos/upload-url
+            Method: post
+
+  IniciarStripeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/pagamentos/
+      Handler: stripe_payment.lambda_handler
+      Environment:
+        Variables:
+          STRIPE_SECRET_KEY: !Ref StripeSecretKey
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /pagamentos/iniciar
+            Method: post
+
+Outputs:
+  ApiUrl:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/"
+  UserPoolId:
+    Description: "Cognito User Pool ID"
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: "Cognito User Pool Client ID"
+    Value: !Ref UserPoolClient
