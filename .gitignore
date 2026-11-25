@@ -104,3 +104,6 @@ temp/
 tmp/
 *.tmp
 *.cache
+
+# gstack (global install)
+.amazonq/rules/gstack.md
